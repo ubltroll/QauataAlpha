@@ -2,6 +2,10 @@ from eth.abc import (
     UnsignedTransactionAPI,
 )
 
+from eth.tools.factories.transaction import (
+    new_transaction as new_eth_transaction
+)
+
 from rainbow import (
     RainbowCrypto,
 )

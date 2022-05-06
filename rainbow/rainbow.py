@@ -95,4 +95,10 @@ class RainbowCrypto(object):
             msg = msg.encode()
         return self.raw_verify(self.public_key, sig, msg)
 
+    @property
+    def public_key(self):
+        return self.public_key
 
+    @property
+    def private_key(self):
+        return self.private_key
