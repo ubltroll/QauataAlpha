@@ -1,2 +1,4 @@
 rainbow/lib*
 rainbow/*.o
+*/__pycache__
+*/__pycache__/*.*
