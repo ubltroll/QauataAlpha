@@ -1,5 +1,6 @@
 from typing import (
     Type,
+    Any,
 )
 
 from eth_bloom import (
@@ -32,14 +33,21 @@ from .headers import (
     compute_heisenberg_difficulty,
     configure_heisenberg_header,
 )
-from .validation import validate_frontier_transaction_against_header
+from .constants import (
+    EIP658_TRANSACTION_STATUS_CODE_FAILURE,
+    EIP658_TRANSACTION_STATUS_CODE_SUCCESS,
+)
+from .validation import (
+    validate_frontier_transaction_against_header,
+    validate_gas_limit,
+)
 
 
 def make_hesienberg_receipt(computation: ComputationAPI,
                           new_cumulative_gas_used: int) -> ReceiptAPI:
     # Reusable for other forks
     # This skips setting the state root (set to 0 instead). The logic for making a state root
-    # lives in the FrontierVM, so that state merkelization at each receipt is skipped at Byzantium+.
+    # lives in the FrontierEVM, so that state merkelization at each receipt is skipped at Byzantium+.
 
     logs = [
         Log(address, topics, data)
@@ -121,8 +129,25 @@ class HeisenbergVM(VM):
 
         gas_used = base_header.gas_used + cls.finalize_gas_used(transaction, computation)
 
-        receipt_without_state_root = make_frontier_receipt(computation, gas_used)
+        if computation.is_error:
+            status_code = EIP658_TRANSACTION_STATUS_CODE_FAILURE
+        else:
+            status_code = EIP658_TRANSACTION_STATUS_CODE_SUCCESS
 
-        return receipt_without_state_root.copy(
-            state_root=state.make_state_root()
-        )
+        return transaction.make_receipt(status_code, gas_used, computation.get_log_entries())
+
+    @classmethod
+    def validate_gas(
+            cls,
+            header: BlockHeaderAPI,
+            parent_header: BlockHeaderAPI) -> None:
+        validate_gas_limit(header.gas_limit, parent_header.gas_limit)
+
+    #
+    # Transactions
+    #
+    def create_transaction(self, *args: Any, **kwargs: Any) -> 'SignedTransactionAPI':
+        return self.get_transaction_builder().new_transaction(*args, **kwargs)
+
+    def create_unsigned_transaction(self, *args: Any, **kwargs: Any) -> 'UnsignedTransactionAPI':
+        return self.get_transaction_builder().create_unsigned_transaction(*args, **kwargs)

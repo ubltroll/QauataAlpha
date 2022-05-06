@@ -27,6 +27,7 @@ from eth.rlp.headers import BlockHeader
 
 from .constants import (
     HEISENBERG_DIFFICULTY_ADJUSTMENT_CUTOFF,
+    HEISENBERG_GAS_LIMIT_MINIMUM,
 )
 
 
@@ -83,10 +84,12 @@ def create_heisenberg_header_from_parent(parent_header: BlockHeaderAPI,
             header_params['timestamp'],
         )
     if 'gas_limit' not in header_params:
-        header_params['gas_limit'] = compute_gas_limit(
-            parent_header,
-            genesis_gas_limit=GENESIS_GAS_LIMIT,
-        )
+        header_params['gas_limit'] = (
+            compute_gas_limit(
+                parent_header,
+                genesis_gas_limit=GENESIS_GAS_LIMIT,
+            )
+        )#TODO: gas limit calculation
 
     all_fields = fill_header_params_from_parent(parent_header, **header_params)
     return BlockHeader(**all_fields)

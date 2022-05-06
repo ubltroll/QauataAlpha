@@ -67,11 +67,6 @@ class QauataTransactionFieldsAPI(ABC):
 
     @property
     @abstractmethod
-    def from_(self) -> Address:
-        ...
-
-    @property
-    @abstractmethod
     def to(self) -> Address:
         ...
 

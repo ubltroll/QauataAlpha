@@ -26,11 +26,17 @@ from .abc import (
     QauataStateAPI,
 )
 
+from .constants import (
+    HEISENBERG_GAS_LIMIT_MINIMUM,
+    HEISENBERG_GAS_LIMIT_MAXIMUM,
+    HEISENBERG_GAS_LIMIT_ADJUSTMENT_FACTOR,
+)
 
 def validate_qauata_public_key(value: bytes, address: Address, title: str = "Value") -> None:
     if len(value) != RainbowCrypto.RAINBOW_PUBLICKEYBYTES:
         raise ValidationError(
             f"{title} is not a valid rainbow Ia circumzenithal public key: "
+            "First transaction must be a keystore transaction: "
             f"  Must be {RainbowCrypto.RAINBOW_PUBLICKEYBYTES} bytes in length: Got length: {len(value)}"
         )
     if value[:len(address)] != address:
@@ -38,6 +44,15 @@ def validate_qauata_public_key(value: bytes, address: Address, title: str = "Val
             f"{title} not matched or address collision:"
             f"  Not matched with address: {address!r}"
         )
+
+def validate_data_before_keystore(value: bytes, address: Address, title: str = "Value") -> None:
+    if value != b'':
+        try:
+            validate_qauata_public_key(value, address, title)
+        except ValidationError:
+            raise ValidationError(
+                f"Bad keystore transaction: {title} is not empty or legal public key"
+            )
 
 def validate_qauata_sig_length(value: bytes, title: str = "Value") -> None:
     if len(value) != RainbowCrypto.RAINBOW_SINATURESBYTES:
@@ -56,8 +71,12 @@ def validate_qauata_private_key_length(value: bytes, title: str = "Value") -> No
 def validate_qauata_transaction_vm(state: QauataStateAPI,
                                 transaction: QauataSignedTransactionAPI) -> None:
     max_gas_cost = transaction.gas * state.get_gas_price(transaction)
-    sender_balance = state.get_balance(transaction.sender)
-
+    try:
+        sender_balance = state.get_balance(transaction.sender)
+    except AttributeError:
+        raise AttributeError(
+            "Transaction must be signed first"
+        )
     if sender_balance < max_gas_cost:
         raise ValidationError(
             f"Sender {transaction.sender!r} cannot afford txn gas "
@@ -111,7 +130,22 @@ def validate_qauata_transaction_signature_logically(transaction: QauataSignedTra
     if not is_verified:
         raise ValidationError("Invalid Signature")
 
+def validate_gas_limit(gas_limit: int, parent_gas_limit: int) -> None:
+    boundary_range = parent_gas_limit // HEISENBERG_GAS_LIMIT_ADJUSTMENT_FACTOR
+#TODO: gas limit calculation
+    # the boundary range is the exclusive limit, therefore the inclusive bounds are
+    # (boundary_range - 1) and (boundary_range + 1) for upper and lower bounds, respectively
+    high_bound = max(HEISENBERG_GAS_LIMIT_MAXIMUM, parent_gas_limit + boundary_range - 1)
+    low_bound = min(HEISENBERG_GAS_LIMIT_MINIMUM, parent_gas_limit - boundary_range + 1)
 
+    if gas_limit < low_bound:
+        raise ValidationError(
+            f"The gas limit {gas_limit} is too low. It must be at least {low_bound}"
+        )
+    elif gas_limit > high_bound:
+        raise ValidationError(
+            f"The gas limit {gas_limit} is too high. It must be at most {high_bound}"
+        )
 
 
 def validate_frontier_transaction_against_header(_vm: VirtualMachineAPI,

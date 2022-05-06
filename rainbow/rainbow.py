@@ -80,7 +80,6 @@ class RainbowCrypto(object):
         self.public_key = public_key
         self.secret_key = secret_key
 
-
     @classmethod
     def new(cls, seed: bytes = None) -> 'RainbowCrypto':
         return cls(*cls.generate_key_pair(seed))
@@ -96,9 +95,5 @@ class RainbowCrypto(object):
         return self.raw_verify(self.public_key, sig, msg)
 
     @property
-    def public_key(self):
-        return self.public_key
-
-    @property
-    def private_key(self):
-        return self.private_key
+    def canonical_address(self):
+        return self.public_key[:20]

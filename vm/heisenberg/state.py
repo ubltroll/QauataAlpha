@@ -43,6 +43,7 @@ from .computation import HeisenbergComputation
 from .constants import (
     REFUND_SELFDESTRUCT,
     MAX_REFUND_QUOTIENT,
+    QAUATA_KEYSTORE_CODE_MARK_LENGTH,
 )
 from .transaction_context import (
     HeisenbergTransactionContext
@@ -56,6 +57,7 @@ from .validation import (
 from .utils import (
     code_is_keystore,
     public_key_to_keystore,
+    is_keystore_transaction,
 )
 
 
@@ -78,12 +80,8 @@ class HeisenbergTransactionExecutor(BaseTransactionExecutor):
         # Buy Gas
         self.vm_state.delta_balance(transaction.sender, -1 * gas_fee)
 
-        # Increment Nonce
-        self.vm_state.increment_nonce(transaction.sender)
-
         # Setup VM Message
         message_gas = transaction.gas - transaction.intrinsic_gas
-
         if transaction.to == CREATE_CONTRACT_ADDRESS:
             contract_address = generate_contract_address(
                 transaction.sender,
@@ -95,16 +93,19 @@ class HeisenbergTransactionExecutor(BaseTransactionExecutor):
             contract_address = None
             data = transaction.data
             code = self.vm_state.get_code(transaction.to)
-
-        if self.vm.has_code_or_nonce(transaction.sender):
+        if self.vm_state.has_code_or_nonce(transaction.sender):
             to = transaction.to
-            depth = 0
+            keystore_flag = False
         else:
             #Keystore Transaction
             to = transaction.sender
             contract_address = transaction.sender
-            depth = -1
+            keystore_flag = True
             code = b''
+
+        # Increment Nonce
+        self.vm_state.increment_nonce(transaction.sender)
+
 
         self.vm_state.logger.debug2(
             (
@@ -127,7 +128,6 @@ class HeisenbergTransactionExecutor(BaseTransactionExecutor):
             value=transaction.value,
             data=data,
             code=code,
-            depth=depth,
             create_address=contract_address,
         )
         return message
@@ -242,14 +242,14 @@ class HeisenbergState(BaseState):
         #If code is keystore then nonce must be positive
         return super().has_code_or_nonce(address)
 
-    def get_publick_key(self, address: Address) -> bytes:
+    def get_public_key(self, address: Address) -> bytes:
         raw_code = BaseState.get_code(self, address)
         if code_is_keystore(address, raw_code):
             return raw_code[QAUATA_KEYSTORE_CODE_MARK_LENGTH:]
         else:
             return b''
 
-    def set_publick_key(self, address: Address, public_key: bytes) -> None:
+    def set_public_key(self, address: Address, public_key: bytes) -> None:
         validate_qauata_public_key(public_key, address, "PBK in vm")
         BaseState.set_code(self, address, public_key_to_keystore(public_key))
 
@@ -261,3 +261,12 @@ class HeisenbergState(BaseState):
     def validate_transaction(self, transaction: SignedTransactionAPI) -> None:
         validate_qauata_transaction_vm(self, transaction)
         validate_qauata_transaction_signature(self, transaction)
+
+    @classmethod
+    def get_transaction_context(cls,
+                                transaction: SignedTransactionAPI) -> HeisenbergTransactionContext:
+        return cls.get_transaction_context_class()(
+            gas_price=transaction.gas_price,
+            origin=transaction.sender,
+            is_keystore=is_keystore_transaction(transaction)
+        )

@@ -58,8 +58,8 @@ class HeisenbergComputation(BaseComputation):
             state: StateAPI,
             message: MessageAPI,
             transaction_context: TransactionContextAPI) -> ComputationAPI:
-        if cls.is_keystore_message(message):
-            return apply_keystore_message(state, message, transaction_context)
+        if transaction_context.is_keystore:
+            return cls.apply_keystore_message(state, message, transaction_context)
 
         snapshot = state.snapshot()
 
@@ -133,9 +133,6 @@ class HeisenbergComputation(BaseComputation):
 
             return computation
 
-    @classmethod
-    def is_keystore_message(cls, message: MessageAPI) -> bool:
-        return message.depth == -1
 
     @classmethod
     def apply_keystore_message(
@@ -148,7 +145,7 @@ class HeisenbergComputation(BaseComputation):
             message,
             transaction_context,
         )
-        state.set_publick_key(message.sender, message.data)
+        state.set_public_key(message.sender, message.data)
         cls.logger.debug2(
             "KEYSTORED: %s",
             encode_hex(message.sender),

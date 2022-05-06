@@ -1,8 +1,9 @@
 from functools import partial
 from typing import (
     Tuple,
+    cast,
 )
-
+from eth_hash.auto import keccak
 from eth_typing import (
     Address,
     Hash32,
@@ -16,7 +17,6 @@ from rlp.sedes import (
 from eth.rlp.sedes import address
 
 from eth.abc import (
-    BaseTransactionAPI,
     ReceiptAPI,
     TransactionBuilderAPI,
 )
@@ -44,18 +44,14 @@ from eth.rlp.transactions import (
     BaseTransactionMethods,
 )
 
-from eth._utils.transactions import (
-    IntrinsicGasSchedule,
-    calculate_intrinsic_gas,
-)
-
 from .abc import (
-    QauataTransactionFieldsAPI as TransactionFieldsAPI,
-    QauataSignedTransactionAPI as SignedTransactionAPI,
-    QauataUnsignedTransactionAPI as UnsignedTransactionAPI,
+    QauataTransactionFieldsAPI,
+    QauataSignedTransactionAPI,
+    QauataUnsignedTransactionAPI,
 )
 
 from .validation import (
+    validate_data_before_keystore,
     validate_qauata_sig_length,
     validate_qauata_public_key,
     validate_qauata_transaction_signature,
@@ -64,15 +60,17 @@ from .validation import (
 
 from .utils import (
     create_transaction_signature,
+    calculate_intrinsic_gas,
 )
 
 
-HEISENBERG_TX_GAS_SCHEDULE = IntrinsicGasSchedule(
-    gas_tx=GAS_TX,
-    gas_txcreate=0,
-    gas_txdatazero=GAS_TXDATAZERO,
-    gas_txdatanonzero=GAS_TXDATANONZERO,
-)
+HEISENBERG_TX_GAS_SCHEDULE = {
+    'gas_tx':GAS_TX,
+    'gas_tx_create':0,
+    'gas_tx_keystore_force':1888888,
+    'gas_txdata_zero':GAS_TXDATAZERO,
+    'gas_txdata_nonzero':GAS_TXDATANONZERO,
+}
 
 
 qauata_get_intrinsic_gas = partial(calculate_intrinsic_gas, HEISENBERG_TX_GAS_SCHEDULE)
@@ -103,8 +101,8 @@ QAUATA_TRANSACTION_FIELDS = [
 
 
 class QauataBaseTransaction(
-        TransactionFieldsAPI,
-        SignedTransactionMethods,
+        rlp.Serializable,
+        QauataTransactionFieldsAPI,
         TransactionBuilderAPI):
     # "Legacy" transactions implemented by BaseTransaction are a combination of
     # the transaction codec (TransactionBuilderAPI) *and* the transaction
@@ -122,7 +120,7 @@ class QauataBaseTransaction(
     fields = QAUATA_TRANSACTION_FIELDS
 
     @classmethod
-    def decode(cls, encoded: bytes) -> SignedTransactionAPI:
+    def decode(cls, encoded: bytes) -> QauataSignedTransactionAPI:
         return rlp.decode(encoded, sedes=cls)
 
     def encode(self) -> bytes:
@@ -132,7 +130,7 @@ class QauataBaseTransaction(
     def hash(self) -> Hash32:
         return cast(Hash32, keccak(rlp.encode(self)))
 
-class HeisenbergTransaction(QauataBaseTransaction):
+class HeisenbergTransaction(QauataBaseTransaction, QauataSignedTransactionAPI):
     fields = QAUATA_TRANSACTION_FIELDS
 
     def validate(self) -> None:
@@ -145,11 +143,8 @@ class HeisenbergTransaction(QauataBaseTransaction):
         validate_is_bytes(self.data, title="Transaction.data")
         validate_is_bytes(self.sig, title="Transaction.sig")
         validate_qauata_sig_length(self.sig, title="Transaction.sig")
-
         if self.nonce == 0:
-            validate_qauata_public_key(transaction.data, transaction.sender, title="Transaction.data")
-
-        super().validate()
+            validate_qauata_public_key(self.data, self.sender, title="Transaction.data")
 
     def check_signature_validity(self) -> None:
         validate_qauata_transaction_signature_logically(self)
@@ -157,8 +152,23 @@ class HeisenbergTransaction(QauataBaseTransaction):
     def get_sender(self) -> Address:
         return getattr(self, "from")
 
+    @property
+    def sender(self) -> Address:
+        return self.get_sender()
+
     def get_intrinsic_gas(self) -> int:
         return qauata_get_intrinsic_gas(self)
+
+    @property
+    def intrinsic_gas(self) -> Address:
+        return self.get_intrinsic_gas()
+
+    @property
+    def access_list(self):
+        return []
+
+    def gas_used_by(self, computation):
+        return self.get_intrinsic_gas() + computation.get_gas_used()
 
     def get_message_for_signing(self) -> bytes:
         kwargs = {
@@ -167,9 +177,19 @@ class HeisenbergTransaction(QauataBaseTransaction):
             "gas": self.gas,
             "to": self.to,
             "value": self.value,
+            "chain_id": self.chain_id,
             "data": self.data,
         }
         return rlp.encode(HeisenbergUnsignedTransaction(**kwargs))
+
+    @property
+    def is_signature_valid(self) -> bool:
+        try:
+            self.check_signature_validity()
+        except ValidationError:
+            return False
+        else:
+            return True
 
     @classmethod
     def create_unsigned_transaction(cls,
@@ -179,8 +199,9 @@ class HeisenbergTransaction(QauataBaseTransaction):
                                     gas: int,
                                     to: Address,
                                     value: int,
+                                    chain_id: int,
                                     data: bytes) -> 'HeisenbergUnsignedTransaction':
-        return HeisenbergUnsignedTransaction(nonce, gas_price, gas, to, value, data)
+        return HeisenbergUnsignedTransaction(nonce, gas_price, gas, to, value, chain_id, data)
 
     @classmethod
     def new_transaction(
@@ -191,9 +212,12 @@ class HeisenbergTransaction(QauataBaseTransaction):
             from_: Address,
             to: Address,
             value: int,
+            chain_id: int,
             data: bytes,
-            sig: bytes) -> SignedTransactionAPI:
-        return cls(nonce, gas_price, gas, from_, to, value, data, sig)
+            sig: bytes) -> QauataSignedTransactionAPI:
+        if nonce == 0:
+            validate_qauata_public_key(data, from_, 'Transaction.data')
+        return cls(nonce, gas_price, gas, from_, to, value, chain_id, data, sig)
 
     def make_receipt(
             self,
@@ -225,7 +249,7 @@ class HeisenbergTransaction(QauataBaseTransaction):
         return self.gas_price
 
 
-class BaseUnsignedTransaction(BaseTransactionMethods, rlp.Serializable, UnsignedTransactionAPI):
+class BaseUnsignedTransaction(BaseTransactionMethods, rlp.Serializable, QauataUnsignedTransactionAPI):
     fields = QAUATA_UNSIGNED_TRANSACTION_FIELDS
 
 
@@ -235,28 +259,28 @@ class HeisenbergUnsignedTransaction(BaseUnsignedTransaction):
         validate_uint256(self.nonce, title="Transaction.nonce")
         validate_is_integer(self.gas_price, title="Transaction.gas_price")
         validate_uint256(self.gas, title="Transaction.gas")
-        validate_canonical_address(self.from_, title="Transaction.from")
         if self.to != CREATE_CONTRACT_ADDRESS:
             validate_canonical_address(self.to, title="Transaction.to")
         validate_uint256(self.value, title="Transaction.value")
         validate_is_bytes(self.data, title="Transaction.data")
-        if self.nonce == 0:
-            validate_qauata_public_key(transaction.data, transaction.sender, title="Transaction.data")
         super().validate()
 
-    def as_signed_transaction(self, private_key: bytes) -> HeisenbergTransaction:
-        sig = create_transaction_signature(self, private_key)
+    def as_signed_transaction(self, chain_id: int, crypto_engine: bytes) -> HeisenbergTransaction:
+        if self.nonce == 0:
+            validate_data_before_keystore(self.data, crypto_engine.canonical_address, 'Transaction.data')
+        sig = create_transaction_signature(self, crypto_engine)
         kwargs = {
             "nonce": self.nonce,
             "gas_price": self.gas_price,
             "gas": self.gas,
-            "from": getattr(self, "from"),
+            "from": crypto_engine.canonical_address,
             "to": self.to,
             "value": self.value,
+            "chain_id": chain_id,
             "data": self.data,
             "sig": sig,
         }
-        return QauataTransaction(**kwargs)
+        return HeisenbergTransaction(**kwargs)
 
     def get_intrinsic_gas(self) -> int:
         return qauata_get_intrinsic_gas(self)

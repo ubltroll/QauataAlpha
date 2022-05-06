@@ -1,0 +1,3 @@
+from .mining import (
+    QauataMiningChain,
+)
