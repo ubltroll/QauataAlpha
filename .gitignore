@@ -2,3 +2,5 @@ rainbow/lib*
 rainbow/*.o
 */__pycache__
 */__pycache__/*.*
+__pycache__/
+*.py[cod]
