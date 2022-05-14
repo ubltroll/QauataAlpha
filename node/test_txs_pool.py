@@ -2,17 +2,59 @@ import asyncio
 import contextlib
 import pytest
 import uuid
+
 from async_service import background_asyncio_service
-from trinity.constants import (
-    NETWORKING_EVENTBUS_ENDPOINT,
-    TO_NETWORKING_BROADCAST_CONFIG,
+from eth._utils.address import (
+    force_bytes_to_address
+)
+import rlp
+
+from trinity._utils.transactions import DefaultTransactionValidator
+from trinity.components.builtin.tx_pool.pool import (
+    TxPool,
+)
+
+from trinity.constants import TO_NETWORKING_BROADCAST_CONFIG
+from trinity.protocol.eth.events import (
+    TransactionsEvent,
 )
 from trinity.protocol.eth.peer import (
     ETHProxyPeerPool,
     ETHPeerPoolEventServer
 )
+from trinity.sync.common.events import SendLocalTransaction
+from trinity.tools.factories import LatestETHPeerPairFactory, ChainContextFactory
+
+from .tx_pool.pool import (
+    InternalTxPool,
+    MemoryTxPool,
+) 
+
 from trinity.protocol.eth.peer import ETHPeerPool
 
+from trinity.protocol.common.events import PeerJoinedEvent
+
+class MockPeerPoolWithConnectedPeers(ETHPeerPool):
+    def __init__(self, peers, event_bus=None) -> None:
+        super().__init__(privkey=None, context=None, event_bus=event_bus)
+        for peer in peers:
+            self.connected_nodes[peer.session] = peer
+
+    async def run(self) -> None:
+        raise NotImplementedError("This is a mock PeerPool implementation, you must not _run() it")
+
+
+@contextlib.asynccontextmanager
+async def run_peer_pool_event_server(event_bus, peer_pool, handler_type=None):
+
+    handler_type = DefaultPeerPoolEventServer if handler_type is None else handler_type
+
+    event_server = handler_type(
+        event_bus,
+        peer_pool,
+    )
+    async with background_asyncio_service(event_server):
+        yield event_server
 
 def observe_incoming_transactions(event_bus):
     incoming_tx = []
@@ -28,23 +70,15 @@ def observe_incoming_transactions(event_bus):
 
     return incoming_tx, got_txns
 
-class MockPeerPoolWithConnectedPeers(ETHPeerPool):
-    def __init__(self, peers, event_bus=None) -> None:
-        super().__init__(privkey=None, context=None, event_bus=event_bus)
-        for peer in peers:
-            self.connected_nodes[peer.session] = peer
 
-    async def run(self) -> None:
-        raise NotImplementedError("This is a mock PeerPool implementation, you must not _run() it")
+@pytest.fixture
+def tx_validator(chain_with_block_validation):
+    return DefaultTransactionValidator(chain_with_block_validation, 0)
 
+@pytest.fixture
+def tx_restore_fn(tx_validator):
+    return lambda tx: tx_validator.get_appropriate_tx_builder().deserialize(tx)
 
-@pytest.fixture(scope='session')
-def event_loop():
-    loop = asyncio.new_event_loop()
-    try:
-        yield loop
-    finally:
-        loop.close()
 
 @pytest.fixture
 async def client_and_server():
@@ -55,44 +89,6 @@ async def client_and_server():
     async with peer_pair as (client_peer, server_peer):
         yield client_peer, server_peer
 
-@contextlib.asynccontextmanager
-async def make_networking_event_bus():
-    # Tests run concurrently, therefore we need unique IPC paths
-    ipc_path = Path(f"networking-{uuid.uuid4()}.ipc")
-    networking_connection_config = ConnectionConfig(
-        name=NETWORKING_EVENTBUS_ENDPOINT,
-        path=ipc_path
-    )
-    async with AsyncioEndpoint.serve(networking_connection_config) as endpoint:
-        yield endpoint
-
-@pytest.fixture
-async def event_bus():
-    async with make_networking_event_bus() as endpoint:
-        yield endpoint
-
-
-# Tests with multiple peers require us to give each of them there independent 'networking' endpoint
-@pytest.fixture
-async def other_event_bus():
-    async with make_networking_event_bus() as endpoint:
-        yield endpoint
-
-from trinity.protocol.common.peer_pool_event_bus import (
-    DefaultPeerPoolEventServer,
-)
-@contextlib.asynccontextmanager
-async def run_peer_pool_event_server(event_bus, peer_pool, handler_type=None):
-
-    handler_type = DefaultPeerPoolEventServer if handler_type is None else handler_type
-
-    event_server = handler_type(
-        event_bus,
-        peer_pool,
-    )
-    async with background_asyncio_service(event_server):
-        yield event_server
-
 
 @pytest.fixture
 async def two_connected_tx_pools(event_bus,
@@ -101,6 +97,7 @@ async def two_connected_tx_pools(event_bus,
                                  funded_address_private_key,
                                  chain_with_block_validation,
                                  tx_validator,
+                                 tx_restore_fn,
                                  client_and_server):
 
     alice_event_bus = event_bus
@@ -125,17 +122,19 @@ async def two_connected_tx_pools(event_bus,
         alice_proxy_peer_pool = ETHProxyPeerPool(alice_event_bus, TO_NETWORKING_BROADCAST_CONFIG)
         await stack.enter_async_context(background_asyncio_service(alice_proxy_peer_pool))
 
-        alice_tx_pool = TxPool(
+        alice_tx_pool = MemoryTxPool(
             alice_event_bus,
             alice_proxy_peer_pool,
             tx_validator,
+            tx_restore_fn
         )
         await stack.enter_async_context(background_asyncio_service(alice_tx_pool))
 
-        bob_tx_pool = TxPool(
+        bob_tx_pool = MemoryTxPool(
             bob_event_bus,
             bob_proxy_peer_pool,
             tx_validator,
+            tx_restore_fn
         )
         await stack.enter_async_context(background_asyncio_service(bob_tx_pool))
 
@@ -151,11 +150,11 @@ def create_random_tx(chain, private_key, is_valid=True):
         data=uuid.uuid4().bytes,
         to=force_bytes_to_address(b'\x10\x10'),
         value=1,
-    ).as_signed_transaction(private_key, chain_id=chain.chain_id)
+    ).as_signed_transaction(private_key, chain_id=chain.chain_id if is_valid else chain.chain_id + 1)
     return rlp.decode(rlp.encode(transaction))
 
 @pytest.mark.asyncio
-async def test_tx_propagation(two_connected_tx_pools,
+async def test_tx_propagation_by_relay_local_tx(two_connected_tx_pools,
                               chain_with_block_validation,
                               funded_address_private_key):
 
@@ -167,48 +166,47 @@ async def test_tx_propagation(two_connected_tx_pools,
     alice_incoming_tx, alice_got_tx = observe_incoming_transactions(alice_event_bus)
     bob_incoming_tx, bob_got_tx = observe_incoming_transactions(bob_event_bus)
 
-    txs_broadcasted_by_alice = [
-        create_random_tx(chain_with_block_validation, funded_address_private_key)
-    ]
 
+    tx_broadcasted_by_alice = create_random_tx(chain_with_block_validation, funded_address_private_key)
+    
     # Alice sends some txs (Important we let the TxPool send them to feed the bloom)
-    await alice_tx_pool._handle_tx(bob.session, txs_broadcasted_by_alice)
+    await alice_event_bus.broadcast(SendLocalTransaction(tx_broadcasted_by_alice))
 
     await asyncio.wait_for(bob_got_tx.wait(), timeout=0.2)
     assert len(bob_incoming_tx) == 1
+    assert alice_tx_pool.pending_txs_number == 1
 
-    assert bob_incoming_tx[0] == txs_broadcasted_by_alice[0]
+    assert bob_incoming_tx[0] == tx_broadcasted_by_alice
 
     # Clear the recording, we asserted all we want and would like to have a fresh start
     bob_incoming_tx.clear()
     bob_got_tx.clear()
-
-    # Alice sends same txs again (Important we let the TxPool send them to feed the bloom)
-    await alice_tx_pool._handle_tx(bob.session, txs_broadcasted_by_alice)
-
-    # Check that Bob doesn't receive them again
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(bob_got_tx.wait(), timeout=0.2)
-    assert len(bob_incoming_tx) == 0
-
-    # Bob sends exact same txs back (Important we let the TxPool send them to feed the bloom)
-    await alice_tx_pool._handle_tx(alice.session, txs_broadcasted_by_alice)
-
-    # Check that Alice won't get them as that is where they originally came from
+    #await alice_tx_pool._handle_tx('local', [tx_broadcasted_by_alice])
+    
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(alice_got_tx.wait(), timeout=0.2)
-    assert len(alice_incoming_tx) == 0
+    assert alice_tx_pool.pending_txs_number == 1
+    assert bob_tx_pool.pending_txs_number == 1
 
-    txs_broadcasted_by_bob = [
-        create_random_tx(chain_with_block_validation, funded_address_private_key),
-        txs_broadcasted_by_alice[0]
-    ]
+    await alice_event_bus.broadcast(SendLocalTransaction(create_random_tx(chain_with_block_validation,
+        funded_address_private_key, is_valid=False)))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(alice_got_tx.wait(), timeout=0.2)
+    assert alice_tx_pool.pending_txs_number == 1
+    assert bob_tx_pool.pending_txs_number == 1
 
-    # Bob sends old + new tx
-    await bob_tx_pool._handle_tx(alice.session, txs_broadcasted_by_bob)
 
-    await asyncio.wait_for(alice_got_tx.wait(), timeout=0.2)
 
-    # Check that Alice receives only the one tx that it didn't know about
-    assert alice_incoming_tx[0] == txs_broadcasted_by_bob[0]
-    assert len(alice_incoming_tx) == 1
+def test_internal_pool(chain_with_block_validation, funded_address_private_key, tx_restore_fn):
+    pool = InternalTxPool(tx_restore_fn)
+    local = create_random_tx(chain_with_block_validation, funded_address_private_key)
+    pool.put_txs([local], isLocal=True)
+    assert len(pool) == 1
+    pool.put_txs([create_random_tx(chain_with_block_validation, funded_address_private_key),
+        create_random_tx(chain_with_block_validation, funded_address_private_key)])
+    assert len(pool) == 3
+    assert pool.get_txs(2)[0] == local
+    assert len(pool) == 3
+    pool.remove(local)
+    assert len(pool) == 2
+
