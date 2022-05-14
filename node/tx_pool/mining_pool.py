@@ -196,6 +196,9 @@ class MiningTxPool(MemoryTxPool):
 
         self.filled_pending_block = filled_pending_block
         return filled_pending_block
+
+    def calculate_difficulty(self):
+        return
     
     async def work(self, filled_pending_block) -> "Tuple['nonce', 'mix_hash']":
         if filled_pending_block.number != self.chain.get_vm().get_block().number:
@@ -219,15 +222,15 @@ class MiningTxPool(MemoryTxPool):
         filled_pending_block = self.filled_pending_block
         if filled_pending_block is None:
             return
-        self.logger.debug3('start mining: difficulty: %d', filled_pending_block.header.difficulty)
+        self.logger.debug2('start mining: difficulty: %d', filled_pending_block.header.difficulty)
         try:
             async with timeout(MINING_TIMEOUT_EACH_STEP):
                 nonce, mix_hash = await self.work(filled_pending_block)
         except asyncio.TimeoutError:
-            self.logger.debug3('Mining miner: time out, release to loop')
+            self.logger.debug2('Mining miner: time out, release to loop')
             return
         except ValueError:
-            self.logger.debug3('Mining miner: illegal header')
+            self.logger.debug2('Mining miner: illegal header')
             return
         self.logger.info('Mining miner: new block # %d found with %d transactions',
                         filled_pending_block.number, len(filled_pending_block.transactions))
