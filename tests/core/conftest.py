@@ -31,6 +31,7 @@ from eth.rlp.headers import BlockHeader
 from vm.heisenberg import (
     HeisenbergVM,
 )
+from vm.gibbs import GibbsVM
 from chains import (
     QauataMiningChain,
 )
@@ -42,10 +43,6 @@ from rainbow import RainbowCrypto
 # This needs to be done before the other imports
 setup_DEBUG2_logging()
 
-
-@pytest.fixture()
-def VM():
-    return HeisenbergVM
 
 
 @pytest.fixture
@@ -72,7 +69,7 @@ def funded_address_initial_balance():
 def _get_genesis_defaults():
     # values that are not yet customizeable (and will automatically be default) are commented out
     return {
-        'difficulty': constants.GENESIS_DIFFICULTY,
+        'difficulty': 1,
         'gas_limit': 6141592,
         'coinbase': constants.GENESIS_COINBASE,
         'nonce': constants.GENESIS_NONCE,
@@ -100,7 +97,7 @@ def genesis_state(funded_address, funded_address_initial_balance):
     }
 
 @pytest.fixture
-def minging_chain_with_block_validation_POW(VM, base_db, genesis_state):
+def minging_chain_with_block_validation_POW(base_db, genesis_state):
     """
     Return a Chain object containing just the genesis block.
     The Chain's state includes one funded account, which can be found in the
@@ -110,6 +107,29 @@ def minging_chain_with_block_validation_POW(VM, base_db, genesis_state):
     importing arbitrarily constructe, not finalized blocks, use the
     chain_without_block_validation fixture instead.
     """
+    VM = HeisenbergVM
+    klass = QauataMiningChain.configure(
+        __name__='TestChain',
+        vm_configuration=(
+            (constants.GENESIS_BLOCK_NUMBER, VM.configure(consensus_class=PowConsensus)),
+        ),
+        chain_id=1337,
+    )
+    chain = klass.from_genesis(base_db, _get_genesis_defaults(), genesis_state)
+    return chain
+
+@pytest.fixture
+def minging_chain_with_block_validation_POW_Gibbs(base_db, genesis_state):
+    """
+    Return a Chain object containing just the genesis block.
+    The Chain's state includes one funded account, which can be found in the
+    funded_address in the chain itself.
+    This Chain will perform all validations when importing new blocks, so only
+    valid and finalized blocks can be used with it. If you want to test
+    importing arbitrarily constructe, not finalized blocks, use the
+    chain_without_block_validation fixture instead.
+    """
+    VM = GibbsVM
     klass = QauataMiningChain.configure(
         __name__='TestChain',
         vm_configuration=(

@@ -1,1 +1,0 @@
-pip install trinity --global-option="-L/opt/homebrew/opt/openssl@1.1/lib" --global-option="-I/opt/homebrew/opt/openssl@1.1/include"
